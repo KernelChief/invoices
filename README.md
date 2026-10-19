@@ -65,20 +65,24 @@ To wire up a container you created some other way instead of making a new one:
 ```bash
 ADOPT=1 CTID=<your container id> bash -c "$(curl -fsSL https://raw.githubusercontent.com/KernelChief/invoices/main/ct/invoices.sh)"
 ```
+> **What this does:** creates a new unprivileged AlmaLinux LXC container, picking a free
+> container ID and your active storage automatically; boots it and waits for networking;
+> installs git + Python inside it, clones this repo, and sets up a venv; then creates and
+> starts a systemd service for the app, plus an `update` command for later.
 
 When it finishes, it prints the container ID and the URL to open
-(`http://<container-ip>:8080`). Making that reachable outside the container — Cloudflare
-Tunnel, a port-forward, Nginx Proxy Manager, whatever fits your setup — is up to you; the
+(`http://<container-ip>:8080`). Making that reachable outside the container, Cloudflare
+Tunnel, a port-forward, Nginx Proxy Manager, whatever fits your setup, is up to you; the
 script doesn't do that part.
 
 The install scripts (`ct/`, `install/`, `misc/`) live in this repo so the one-liner above is
-self-contained — anyone running it only needs this repo, not access to any private
+self-contained: anyone running it only needs this repo, not access to any private
 infrastructure.
 
 ### Options
 
 Set these as environment variables before the `bash -c "..."` call, e.g.
-`CORES=2 RAM=512 bash -c "..."`. Everything below is optional — sensible defaults are used if
+`CORES=2 RAM=512 bash -c "..."`. Everything below is optional, sensible defaults are used if
 you skip it.
 
 | Variable | Default | What it controls |
@@ -97,10 +101,11 @@ you skip it.
 | `FEATURES` | `nesting=1` | LXC features passed to `pct create` |
 | `APP_BRANCH` | `main` | Branch of this app's repo to install |
 | `SCRIPTS_BRANCH` | `main` | Branch of the install scripts themselves |
+| `GIT_HOST` + `GIT_USER` | GitHub / `KernelChief` | Install from a different git host or account, e.g. your own fork |
 | `AUTO_UPDATE` | `0` | Set to `1` to check for updates automatically inside the container |
 | `INTERVAL` | `1h` | How often, when `AUTO_UPDATE=1` |
-| `FORGEJO_USER` + `FORGEJO_TOKEN` | none | Only needed if the app repo is private |
-| `ADOPT` + `CTID` | off | Point an **existing** container at this installer instead of creating a new one, e.g. `ADOPT=1 CTID=<your container id> bash -c "..."` |
+| `GIT_AUTH_USER` + `GIT_TOKEN` | none | Only needed if the app repo is private |
+| `ADOPT` + `CTID` | off | Point an **existing** container at this installer instead of creating a new one, e.g. `ADOPT=1 CTID=121 bash -c "..."` |
 
 
 
