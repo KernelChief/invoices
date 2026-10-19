@@ -66,7 +66,43 @@ To wire up a container you created some other way instead of making a new one:
 ADOPT=1 CTID=<your container id> bash -c "$(curl -fsSL https://raw.githubusercontent.com/KernelChief/invoices/main/ct/invoices.sh)"
 ```
 
-More options (static IP, storage selection, automatic updates on a timer, a private repo token) are documented at the top of misc/build.func.
+When it finishes, it prints the container ID and the URL to open
+(`http://<container-ip>:8080`). Making that reachable outside the container — Cloudflare
+Tunnel, a port-forward, Nginx Proxy Manager, whatever fits your setup — is up to you; the
+script doesn't do that part.
+
+The install scripts (`ct/`, `install/`, `misc/`) live in this repo so the one-liner above is
+self-contained — anyone running it only needs this repo, not access to any private
+infrastructure.
+
+### Options
+
+Set these as environment variables before the `bash -c "..."` call, e.g.
+`CORES=2 RAM=512 bash -c "..."`. Everything below is optional — sensible defaults are used if
+you skip it.
+
+| Variable | Default | What it controls |
+|---|---|---|
+| `CTID` | next free ID | Container ID to create (or adopt, with `ADOPT=1`) |
+| `CT_HOSTNAME` | `overtime` | Hostname of the container |
+| `CORES` | `1` | CPU cores |
+| `RAM` | `256` | Memory in MB |
+| `DISK` | `3` | Root disk size in GB |
+| `STORAGE` | auto-picked | Storage for the container's root disk |
+| `TEMPLATE_STORAGE` | auto-picked | Storage for the AlmaLinux template |
+| `BRIDGE` | `vmbr0` | Network bridge |
+| `VLAN` | none | VLAN tag, if your network needs one |
+| `STATIC_IP` + `GATEWAY` | DHCP | Set both together for a static IP, e.g. `STATIC_IP=10.0.0.50/24 GATEWAY=10.0.0.1` |
+| `ALMA_VER` | latest available | AlmaLinux major version |
+| `FEATURES` | `nesting=1` | LXC features passed to `pct create` |
+| `APP_BRANCH` | `main` | Branch of this app's repo to install |
+| `SCRIPTS_BRANCH` | `main` | Branch of the install scripts themselves |
+| `AUTO_UPDATE` | `0` | Set to `1` to check for updates automatically inside the container |
+| `INTERVAL` | `1h` | How often, when `AUTO_UPDATE=1` |
+| `FORGEJO_USER` + `FORGEJO_TOKEN` | none | Only needed if the app repo is private |
+| `ADOPT` + `CTID` | off | Point an **existing** container at this installer instead of creating a new one, e.g. `ADOPT=1 CTID=<your container id> bash -c "..."` |
+
+
 
 ---
 
