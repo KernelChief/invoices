@@ -5,7 +5,8 @@
 [![Made with Python](https://img.shields.io/badge/Made%20with-Python-3776AB?logo=python&logoColor=white)](https://www.python.org/) 
 [![Flask](https://img.shields.io/badge/Framework-Flask-000000?logo=flask&logoColor=white)](https://flask.palletsprojects.com/) 
 [![Platform](https://img.shields.io/badge/Platform-Proxmox%20LXC%20%2F%20AlmaLinux-E95420)](https://www.proxmox.com/) 
-[![Buy Me A Coffee](https://img.shields.io/badge/Support-Buy%20Me%20A%20Coffee-orange?logo=buy-me-a-coffee)](https://buymeacoffee.com/ttheroux)
+[![Buy Me A Coffee](https://img.shields.io/badge/Support-Buy%20Me%20A%20Coffee-orange?logo=buy-me-a-coffee)](https://buymeacoffee.com/ttheroux) 
+[![License: GPL-3.0](https://img.shields.io/badge/License-GPL%20v3-blue.svg)](LICENSE)
 
 This isn't trying to be QuickBooks, FreshBooks, or any other full accounting platform, it
 doesn't do taxes, expenses, bookkeeping, or payroll, and it never will. It exists for a much
