@@ -105,7 +105,7 @@ you skip it.
 | `AUTO_UPDATE` | `0` | Set to `1` to check for updates automatically inside the container |
 | `INTERVAL` | `1h` | How often, when `AUTO_UPDATE=1` |
 | `GIT_AUTH_USER` + `GIT_TOKEN` | none | Only needed if the app repo is private |
-| `ADOPT` + `CTID` | off | Point an **existing** container at this installer instead of creating a new one, e.g. `ADOPT=1 CTID=121 bash -c "..."` |
+| `ADOPT` + `CTID` | off | Point an **existing** container at this installer instead of creating a new one, e.g. `ADOPT=1 CTID=<your container id> bash -c "..."` |
 
 
 
