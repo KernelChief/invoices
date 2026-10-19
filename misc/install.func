@@ -1,0 +1,174 @@
+# Runs INSIDE the container (the Proxmox host pushes it to /root and sources it from install/<app>-install.sh).
+# Safe to run again: it can adopt a container that was set up by hand earlier.
+set -euo pipefail
+
+msg() { echo -e "\e[1;34m>>\e[0m $*"; }
+die() { echo -e "\e[1;31mERROR:\e[0m $*" >&2; exit 1; }
+
+install_app() {
+  : "${APP:?}" "${APP_REPO:?}" "${APP_BRANCH:?}" "${SCRIPTS_REPO:?}" "${SCRIPTS_BRANCH:?}" "${PORT:?}"
+  local EXTRA_PACKAGES="${EXTRA_PACKAGES:-}" AUTO_UPDATE="${AUTO_UPDATE:-0}" INTERVAL="${INTERVAL:-1h}"
+  local SRC="/opt/$APP/src" VENV="/opt/$APP/venv" CLONE_URL="${APP_REPO}.git" EXTRA="" ok=0
+
+  msg "Installing git and Python"
+  # shellcheck disable=SC2086
+  dnf install -y -q git python3 python3-pip $EXTRA_PACKAGES
+  [ -x "$VENV/bin/python" ] || python3 -m venv "$VENV"
+
+  if [ -n "${FORGEJO_TOKEN:-}" ]; then
+    CLONE_URL="${CLONE_URL%%://*}://${FORGEJO_USER:?Set FORGEJO_USER together with FORGEJO_TOKEN}:${FORGEJO_TOKEN}@${CLONE_URL#*://}"
+  fi
+
+  msg "Fetching $APP from git ($APP_BRANCH)"
+  if [ -d "$SRC/.git" ]; then
+    git -C "$SRC" remote set-url origin "$CLONE_URL"
+    git -C "$SRC" fetch -q origin "$APP_BRANCH"
+    git -C "$SRC" checkout -q -B "$APP_BRANCH" "origin/$APP_BRANCH"
+  else
+    git clone -q --branch "$APP_BRANCH" "$CLONE_URL" "$SRC" \
+      || die "git clone failed. Check the repo address and branch (private repo? FORGEJO_USER + FORGEJO_TOKEN)."
+  fi
+  [ -f "$SRC/app.py" ] || die "The app repo has no app.py at its top level."
+
+  msg "Installing Python packages"
+  "$VENV/bin/pip" install -q -r "$SRC/requirements.txt"
+
+  msg "Enabling console autologin (root), like community-scripts containers"
+  GETTY_OVERRIDE="/etc/systemd/system/container-getty@1.service.d/override.conf"
+  mkdir -p "$(dirname "$GETTY_OVERRIDE")"
+  cat > "$GETTY_OVERRIDE" <<'EOF'
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty --autologin root --noclear --keep-baud tty%I 115200,38400,9600 $TERM
+EOF
+  systemctl daemon-reload
+  systemctl restart container-getty@1.service 2>/dev/null || true
+
+  msg "Setting up the login banner"
+  BANNER="/etc/profile.d/00-$APP-details.sh"
+  cat > "$BANNER" <<EOF
+[ -t 1 ] || return 0
+echo
+echo -e "\e[1m${APP^} LXC Container\e[0m"
+echo -e "  \xf0\x9f\x8c\x90  Provided by: $APP_REPO"
+echo
+EOF
+  cat >> "$BANNER" <<'EOF'
+os_display="Unknown OS"
+if [ -r /etc/os-release ]; then
+  . /etc/os-release
+  os_display="${PRETTY_NAME:-${NAME:-Unknown OS}}"
+fi
+echo -e "  \xf0\x9f\x96\xa5\xef\xb8\x8f  OS: $os_display"
+echo -e "  \xf0\x9f\x8f\xa0  Hostname: $(hostname)"
+echo -e "  \xf0\x9f\x92\xa1  IP Address: $(hostname -I | awk '{print $1}')"
+echo
+EOF
+  chmod 644 "$BANNER"
+
+  msg "Setting up the service and the update command"
+  mkdir -p "/var/lib/$APP"
+  # keep a COOKIE_SECURE setting if the service already had one
+  EXTRA="$(grep -h '^Environment=COOKIE_SECURE' "/etc/systemd/system/$APP.service" 2>/dev/null || true)"
+
+  cat > "/etc/systemd/system/$APP.service" <<EOF
+[Unit]
+Description=$APP
+After=network.target
+
+[Service]
+ExecStart=$VENV/bin/python $SRC/app.py
+Restart=always
+Environment=DB_PATH=/var/lib/$APP/$APP.db
+$EXTRA
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  umask 077
+  cat > /etc/app-update.conf <<EOF
+APP=$APP
+APP_BRANCH=$APP_BRANCH
+SRC=$SRC
+VENV=$VENV
+PORT=$PORT
+SCRIPTS_REPO=$SCRIPTS_REPO
+SCRIPTS_BRANCH=$SCRIPTS_BRANCH
+FORGEJO_TOKEN=${FORGEJO_TOKEN:-}
+EOF
+  umask 022
+
+  install -m 755 /root/app-update.sh /usr/local/bin/app-update
+  cat > /usr/bin/update <<'STUB'
+#!/usr/bin/env bash
+# `update`: fetch the current updater from the homelab-scripts repo, then run it
+# (same idea as the community scripts, whose `update` re-fetches their script each time).
+set -u
+# shellcheck disable=SC1091
+. /etc/app-update.conf
+TMP="$(mktemp)"; trap 'rm -f "$TMP"' EXIT
+if python3 - "$SCRIPTS_REPO/misc/app-update.sh" "${FORGEJO_TOKEN:-}" > "$TMP" 2>/dev/null <<'PY'
+import sys, urllib.request
+req = urllib.request.Request(sys.argv[1])
+if sys.argv[2]:
+    req.add_header("Authorization", "token " + sys.argv[2])
+sys.stdout.write(urllib.request.urlopen(req, timeout=15).read().decode())
+PY
+then
+  if [ -s "$TMP" ] && bash -n "$TMP" 2>/dev/null; then
+    install -m 755 "$TMP" /usr/local/bin/app-update
+  else
+    echo "The downloaded updater looks broken, using the installed one." >&2
+  fi
+else
+  echo "Couldn't reach $SCRIPTS_REPO, using the installed updater." >&2
+fi
+exec /usr/local/bin/app-update "$@"
+STUB
+  chmod 755 /usr/bin/update
+
+  systemctl daemon-reload
+  systemctl enable "$APP" >/dev/null 2>&1
+  systemctl restart "$APP"
+
+  if [ "$AUTO_UPDATE" = "1" ]; then
+    msg "Turning on automatic updates (every $INTERVAL)"
+    cat > /etc/systemd/system/app-update.service <<EOF
+[Unit]
+Description=Pull $APP from git
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/app-update
+EOF
+    cat > /etc/systemd/system/app-update.timer <<EOF
+[Unit]
+Description=Check git for new versions of $APP
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=$INTERVAL
+
+[Install]
+WantedBy=timers.target
+EOF
+    systemctl daemon-reload
+    systemctl enable app-update.timer >/dev/null 2>&1
+    systemctl start app-update.timer
+  fi
+
+  msg "Waiting for $APP to answer"
+  for _ in $(seq 1 20); do
+    sleep 1
+    if "$VENV/bin/python" - "$PORT" <<'PY'
+import sys, urllib.request
+try:
+    urllib.request.urlopen(f"http://127.0.0.1:{sys.argv[1]}/login", timeout=3)
+except Exception:
+    sys.exit(1)
+PY
+    then ok=1; break; fi
+  done
+  [ "$ok" = 1 ] || die "$APP didn't start. Check: journalctl -u $APP -n 50"
+}

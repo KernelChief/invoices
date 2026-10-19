@@ -1,0 +1,123 @@
+# Library for ct/<app>.sh. Runs on the Proxmox host (fetched from the repo, then eval'd).
+# Expects from the caller: APP APP_TITLE PORT APP_REPO APP_BRANCH SCRIPTS_REPO SCRIPTS_BRANCH
+#                          CORES RAM DISK and the CURL array.
+#
+# Optional environment (all have sensible defaults):
+#   CTID=<id>  CT_HOSTNAME=<name>  STORAGE=<rootfs storage>  TEMPLATE_STORAGE=<template storage>
+#   BRIDGE=vmbr0  VLAN=<tag>  STATIC_IP=10.0.0.50/24 GATEWAY=10.0.0.1  ALMA_VER=10
+#   FEATURES=nesting=1   (LXC features passed to `pct create`; nesting is on by default)
+#   APP_BRANCH=main  SCRIPTS_BRANCH=main
+#   ADOPT=1 CTID=<id>   (wire an existing container to git instead of creating a new one)
+#   AUTO_UPDATE=1 INTERVAL=1h   (optional: let the container check for updates by itself)
+#   FORGEJO_USER + FORGEJO_TOKEN   (private repos: a token that can read them)
+set -euo pipefail
+
+msg() { echo -e "\e[1;34m>>\e[0m $*"; }
+die() { echo -e "\e[1;31mERROR:\e[0m $*" >&2; exit 1; }
+
+command -v pct >/dev/null 2>&1 || die "Run this on the Proxmox host (pct not found)."
+[ "$(id -u)" = 0 ] || die "Run this as root."
+
+fetch() { "${CURL[@]}" "$SCRIPTS_REPO/$1"; }  # SCRIPTS_REPO is a fully-qualified raw-file base URL (branch already baked in)
+
+# pick_storage <content-type> [preset]  ->  prints a storage name
+pick_storage() {
+  local content="$1" preset="${2:-}" list=() s
+  mapfile -t list < <(pvesm status --content "$content" | awk 'NR>1 && $3=="active"{print $1}')
+  [ "${#list[@]}" -gt 0 ] || die "No active storage supports '$content'."
+  if [ -n "$preset" ]; then
+    printf '%s\n' "${list[@]}" | grep -qx "$preset" \
+      || die "Storage '$preset' is not active or doesn't support '$content' (available: ${list[*]})."
+    echo "$preset"; return
+  fi
+  if [ "${#list[@]}" -eq 1 ] || [ ! -t 0 ]; then echo "${list[0]}"; return; fi
+  echo "Choose a storage for '$content':" >&2
+  select s in "${list[@]}"; do
+    if [ -n "$s" ]; then echo "$s"; return; fi
+  done
+}
+
+build_container() {
+  local ADOPT="${ADOPT:-0}" TMP IP
+
+  if [ "$ADOPT" = "1" ]; then
+    [ -n "${CTID:-}" ] || die "ADOPT=1 needs CTID=<existing container id>."
+    pct status "$CTID" >/dev/null 2>&1 || die "Container $CTID doesn't exist."
+    pct status "$CTID" | grep -q running || pct start "$CTID"
+    msg "Adopting existing container $CTID ($APP)"
+  else
+    CTID="${CTID:-$(pvesh get /cluster/nextid)}"
+    local STORE TSTORE TEMPLATE NET
+    STORE="$(pick_storage rootdir "${STORAGE:-}")"
+    TSTORE="$(pick_storage vztmpl "${TEMPLATE_STORAGE:-}")"
+
+    msg "Looking for an AlmaLinux template"
+    pveam update >/dev/null
+    TEMPLATE="$(pveam available --section system | awk '{print $2}' | grep -E "^almalinux-${ALMA_VER:-[0-9]+}-default" | sort -V | tail -1)"
+    [ -n "$TEMPLATE" ] || die "No AlmaLinux template found via pveam."
+    pveam list "$TSTORE" | grep -q "$TEMPLATE" || pveam download "$TSTORE" "$TEMPLATE"
+
+    NET="name=eth0,bridge=${BRIDGE:-vmbr0}"
+    if [ -n "${STATIC_IP:-}" ]; then
+      NET+=",ip=$STATIC_IP,gw=${GATEWAY:?Set GATEWAY=<router ip> together with STATIC_IP}"
+    else
+      NET+=",ip=dhcp"
+    fi
+    [ -n "${VLAN:-}" ] && NET+=",tag=$VLAN"
+
+    msg "Creating container $CTID ($APP) on $STORE"
+    pct create "$CTID" "$TSTORE:vztmpl/$TEMPLATE" \
+      --hostname "${CT_HOSTNAME:-$APP}" --cores "$CORES" --memory "$RAM" --swap 0 \
+      --rootfs "$STORE:$DISK" --net0 "$NET" \
+      --unprivileged 1 --onboot 1 --features "${FEATURES:-nesting=1}" --tags "homelab;$APP"
+    pct start "$CTID"
+
+    msg "Waiting for the network"
+    for _ in $(seq 1 30); do
+      pct exec "$CTID" -- getent hosts mirrors.almalinux.org >/dev/null 2>&1 && break
+      sleep 2
+    done
+  fi
+
+  msg "Running the installer inside the container"
+  TMP="$(mktemp -d)"; trap "rm -rf '$TMP'" EXIT
+  fetch "install/$APP-install.sh" > "$TMP/app-install.sh" || die "Couldn't fetch install/$APP-install.sh from $SCRIPTS_REPO."
+  fetch "misc/install.func" > "$TMP/install.func" || die "Couldn't fetch misc/install.func."
+  fetch "misc/app-update.sh" > "$TMP/app-update.sh" || die "Couldn't fetch misc/app-update.sh."
+  cat > "$TMP/install.env" <<EOF
+APP='$APP'
+APP_TITLE='$APP_TITLE'
+APP_REPO='$APP_REPO'
+APP_BRANCH='$APP_BRANCH'
+SCRIPTS_REPO='$SCRIPTS_REPO'
+SCRIPTS_BRANCH='$SCRIPTS_BRANCH'
+PORT='$PORT'
+AUTO_UPDATE='${AUTO_UPDATE:-0}'
+INTERVAL='${INTERVAL:-1h}'
+FORGEJO_USER='${FORGEJO_USER:-}'
+FORGEJO_TOKEN='${FORGEJO_TOKEN:-}'
+EOF
+  pct push "$CTID" "$TMP/app-install.sh" /root/app-install.sh
+  pct push "$CTID" "$TMP/install.func" /root/install.func
+  pct push "$CTID" "$TMP/app-update.sh" /root/app-update.sh
+  pct push "$CTID" "$TMP/install.env" /root/install.env --perms 600
+  pct exec "$CTID" -- bash -c 'set -a; . /root/install.env; set +a; bash /root/app-install.sh; rc=$?; rm -f /root/install.env /root/app-install.sh /root/install.func /root/app-update.sh; exit $rc' \
+    || die "The installer failed inside container $CTID (see the output above)."
+
+  if [ "$ADOPT" != "1" ]; then
+    pct set "$CTID" --description "$APP_TITLE
+App: $APP_REPO ($APP_BRANCH)
+Scripts: $SCRIPTS_REPO
+To update: run 'update' in this container" >/dev/null 2>&1 || true
+  fi
+
+  IP="$(pct exec "$CTID" -- hostname -I | awk '{print $1}')"
+  echo
+  echo -e "\e[1;32mDone.\e[0m $APP_TITLE is running at: http://$IP:$PORT"
+  echo "  - Container: $CTID"
+  echo "  - After you push changes to $APP_REPO, update with:   pct exec $CTID -- update"
+  echo "    (or type 'update' in the container console)"
+  [ "${AUTO_UPDATE:-0}" = "1" ] && echo "  - Automatic updates are ON, checking every ${INTERVAL:-1h}."
+  echo "  - Update history: pct exec $CTID -- journalctl -t app-update -n 20"
+  echo "  - Your data is NOT in the repo: /var/lib/$APP/$APP.db inside CT $CTID. Keep it in your backups."
+}
